@@ -2,92 +2,83 @@
 
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
 import calendar
 
-st.set_page_config(page_title="売上データ分析", layout="wide")
-st.title("📊 売上データ分析アプリ（施設別・月別）")
+st.set_page_config(page_title="売上比較アプリ", layout="wide")
+st.title("📊 年度別 売上データ比較アプリ")
 
-uploaded_file = st.file_uploader("CSVファイルをアップロードしてください", type="csv")
+st.markdown("2つの年度のCSVをアップロードして、同じ月の売上や指標を比較できます。")
 
-if uploaded_file:
+# アップロード欄
+col1, col2 = st.columns(2)
+with col1:
+    file1 = st.file_uploader("📂 データ①（前年など）", type="csv", key="file1")
+with col2:
+    file2 = st.file_uploader("📂 データ②（今年など）", type="csv", key="file2")
+
+# 両方ともアップロードされたら処理開始
+if file1 and file2:
     # データ読み込み
-    df = pd.read_csv(uploaded_file)
-    df['チェックイン'] = pd.to_datetime(df['チェックイン'])
-    df['予約日'] = pd.to_datetime(df['予約日'])
+    df1 = pd.read_csv(file1)
+    df2 = pd.read_csv(file2)
 
-    # 日付情報追加
-    df['年月'] = df['チェックイン'].dt.to_period('M').astype(str)
-    df['リードタイム（日）'] = (df['チェックイン'] - df['予約日']).dt.days
-    df['平均宿泊単価'] = df['販売'] / df['合計日数']
+    # 日付変換
+    for df in [df1, df2]:
+        df['チェックイン'] = pd.to_datetime(df['チェックイン'])
+        df['予約日'] = pd.to_datetime(df['予約日'])
+        df['年月'] = df['チェックイン'].dt.to_period('M').astype(str)
+        df['リードタイム（日）'] = (df['チェックイン'] - df['予約日']).dt.days
+        df['平均宿泊単価'] = df['販売'] / df['合計日数']
 
-    # 月選択
-    unique_months = sorted(df['年月'].unique())
-    selected_month = st.selectbox("📅 分析する月を選んでください", unique_months)
+    # ✅ 月選択（例：6月）
+    all_months = sorted(set(df1['チェックイン'].dt.month.unique()) | set(df2['チェックイン'].dt.month.unique()))
+    target_month = st.selectbox("🗓 比較対象の月を選んでください", all_months)
 
-    # 該当月にフィルタ
-    df_month = df[df['年月'] == selected_month]
-    year, month = map(int, selected_month.split('-'))
-    days_in_month = calendar.monthrange(year, month)[1]
+    # 年ごとにフィルター
+    df1_filtered = df1[df1['チェックイン'].dt.month == target_month]
+    df2_filtered = df2[df2['チェックイン'].dt.month == target_month]
 
-    # 集計（施設別）
-    summary = df_month.groupby('物件名').agg({
-        '販売': 'sum',
-        '平均宿泊単価': 'mean',
-        'リードタイム（日）': 'mean',
-        '合計日数': 'sum'
-    }).reset_index()
+    # 年を自動判定
+    year1 = df1_filtered['チェックイン'].dt.year.min()
+    year2 = df2_filtered['チェックイン'].dt.year.min()
 
-    # 稼働率（最大100%）
-    summary['稼働率'] = (summary['合計日数'] / days_in_month).clip(upper=1.0)
-    summary['稼働率'] = (summary['稼働率'] * 100).round(1).astype(str) + '%'
+    # 月の日数取得（稼働率計算用）
+    days_in_month = calendar.monthrange(year2, target_month)[1]  # 最新年を基準に
 
-    # 全体サマリー
-    st.subheader(f"📈 {selected_month} の全体サマリー")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("総売上", f"{df_month['販売'].sum():,} 円")
-    col2.metric("平均宿泊単価", f"{df_month['平均宿泊単価'].mean():,.0f} 円")
-    col3.metric("平均リードタイム", f"{df_month['リードタイム（日）'].mean():.1f} 日")
+    # 集計処理
+    def summarize(df):
+        grouped = df.groupby('物件名').agg({
+            '販売': 'sum',
+            '平均宿泊単価': 'mean',
+            'リードタイム（日）': 'mean',
+            '合計日数': 'sum'
+        }).reset_index()
+        grouped['稼働率'] = (grouped['合計日数'] / days_in_month).clip(upper=1.0)
+        return grouped
 
-    # 表表示
-    st.subheader("🏠 施設別サマリー（選択月）")
-    st.dataframe(summary[['物件名', '販売', '平均宿泊単価', 'リードタイム（日）', '稼働率']])
+    summary1 = summarize(df1_filtered)
+    summary2 = summarize(df2_filtered)
 
-    # ダウンロード
-    csv = summary.to_csv(index=False).encode('utf-8')
+    # 比較用のマージ
+    merged = pd.merge(summary1, summary2, on="物件名", how="outer", suffixes=(f'_{year1}', f'_{year2}'))
+    merged.fillna(0, inplace=True)  # データがない物件は0で埋める
+
+    # 差分列の追加（例：販売_差分）
+    merged['販売_差分'] = merged[f'販売_{year2}'] - merged[f'販売_{year1}']
+    merged['平均宿泊単価_差分'] = merged[f'平均宿泊単価_{year2}'] - merged[f'平均宿泊単価_{year1}']
+    merged['リードタイム_差分'] = merged[f'リードタイム（日）_{year2}'] - merged[f'リードタイム（日）_{year1}']
+
+    # 表示
+    st.subheader(f"📋 {year1}年 vs {year2}年 - {target_month}月 比較表（施設別）")
+    st.dataframe(merged)
+
+    # CSVダウンロード
+    download = merged.to_csv(index=False).encode('utf-8')
     st.download_button(
-        label="📥 CSVでダウンロード",
-        data=csv,
-        file_name=f'{selected_month}_summary.csv',
+        label="📥 比較結果をCSVでダウンロード",
+        data=download,
+        file_name=f"comparison_{year1}_vs_{year2}_month{target_month}.csv",
         mime='text/csv'
     )
-
-    # グラフ対象施設選択
-    st.subheader("📊 指標別の棒グラフ（日別 × 施設別）")
-    facility_options = df_month['物件名'].unique().tolist()
-    selected_facilities = st.multiselect("表示する施設を選んでください", facility_options, default=facility_options[:3])
-
-    # 指標選択
-    metric = st.selectbox("表示する指標を選んでください", ['販売', '平均宿泊単価', 'リードタイム（日）'])
-
-    if selected_facilities:
-        graph_df = df_month[df_month['物件名'].isin(selected_facilities)]
-        grouped = graph_df.groupby(['チェックイン', '物件名'])[metric].sum().reset_index()
-
-        # グラフ描画
-        plt.figure(figsize=(12, 6))
-        for name in selected_facilities:
-            subset = grouped[grouped['物件名'] == name]
-            x = subset['チェックイン'].dt.strftime('%m-%d')
-            y = subset[metric]
-            plt.bar(x, y, label=name)
-
-        plt.xlabel("チェックイン日")
-        plt.ylabel(metric)
-        plt.title(f"{selected_month} の {metric} の日別棒グラフ")
-        plt.xticks(rotation=45)
-        plt.legend()
-        plt.tight_layout()
-        st.pyplot(plt)
-    else:
-        st.info("施設を1つ以上選択してください。")
+else:
+    st.info("2つのCSVファイルをアップロードしてください。")
