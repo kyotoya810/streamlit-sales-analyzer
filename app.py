@@ -1,74 +1,56 @@
-# app.py
+import calendar
 
-import streamlit as st
-import pandas as pd
-import matplotlib.pyplot as plt
-from io import BytesIO
+# 年月の選択
+unique_months = sorted(df['年月'].unique())
+selected_month = st.selectbox("📅 分析する月を選んでください", unique_months)
 
-# タイトルを表示
-st.title("売上データ分析アプリ")
+# 選んだ月に絞り込み
+df_month = df[df['年月'] == selected_month]
 
-# ファイルアップロード欄を表示
-uploaded_file = st.file_uploader("CSVファイルをアップロードしてください", type="csv")
+# 月の日数を取得（稼働率計算に使用）
+year, month = map(int, selected_month.split('-'))
+days_in_month = calendar.monthrange(year, month)[1]
 
-if uploaded_file:
-    # アップロードされたCSVをDataFrameとして読み込む
-    df = pd.read_csv(uploaded_file)
+# 集計処理（施設別）
+summary = df_month.groupby('物件名').agg({
+    '販売': 'sum',
+    '平均宿泊単価': 'mean',
+    'リードタイム（日）': 'mean',
+    '合計日数': 'sum'
+}).reset_index()
 
-    # 日付の列をdatetime型に変換（重要：計算に必要）
-    df['チェックイン'] = pd.to_datetime(df['チェックイン'])
-    df['予約日'] = pd.to_datetime(df['予約日'])
+# 稼働率（最大100%）
+summary['稼働率'] = (summary['合計日数'] / days_in_month).clip(upper=1.0)  # 1.0 = 100%
+summary['稼働率'] = (summary['稼働率'] * 100).round(1).astype(str) + '%'
 
-    # 年月を追加（「2024-05」の形式で月を識別）
-    df['年月'] = df['チェックイン'].dt.to_period('M').astype(str)
+# 合計サマリー（画面上部に表示）
+st.subheader(f"📈 {selected_month} の全体サマリー")
+st.write(f"✅ 総売上: {df_month['販売'].sum():,.0f} 円")
+st.write(f"✅ 平均宿泊単価: {df_month['平均宿泊単価'].mean():,.0f} 円")
+st.write(f"✅ 平均リードタイム: {df_month['リードタイム（日）'].mean():.1f} 日")
 
-    # リードタイム列（チェックイン日 - 予約日）
-    df['リードタイム（日）'] = (df['チェックイン'] - df['予約日']).dt.days
+# 表の表示
+st.subheader("🏠 施設別集計（選択月）")
+st.dataframe(summary[['物件名', '販売', '平均宿泊単価', 'リードタイム（日）', '稼働率']])
 
-    # 平均宿泊単価（販売 ÷ 合計日数）
-    df['平均宿泊単価'] = df['販売'] / df['合計日数']
+# 選択式でグラフ対象の施設を選ぶ
+facility_options = df_month['物件名'].unique().tolist()
+selected_facilities = st.multiselect("📊 グラフで表示したい施設を選んでください", facility_options, default=facility_options[:3])
 
-    # 稼働率（合計日数 ÷ 30）
-    df['稼働率'] = df['合計日数'] / 30
+if selected_facilities:
+    st.subheader("📉 グラフ表示（選択施設）")
+    metric = st.selectbox("表示する指標", ['販売', '平均宿泊単価', 'リードタイム（日）'])
 
-    # 月×施設ごとにグループ化して集計
-    summary = df.groupby(['年月', '物件名']).agg({
-        '販売': 'sum',
-        '平均宿泊単価': 'mean',
-        'リードタイム（日）': 'mean',
-        '稼働率': 'mean'
-    }).reset_index()
-
-    # 集計結果を見やすく縦型表示
-    st.subheader("📊 集計結果（施設 × 月）")
-    st.dataframe(summary)
-
-    # CSVでダウンロードできるようにする
-    def convert_df_to_csv(df):
-        return df.to_csv(index=False).encode('utf-8')
-
-    csv_data = convert_df_to_csv(summary)
-    st.download_button(
-        label="📥 結果をCSVでダウンロード",
-        data=csv_data,
-        file_name='summary.csv',
-        mime='text/csv'
-    )
-
-    # グラフで表示したい項目を選択
-    graph_option = st.selectbox("📈 グラフで表示する指標を選んでください", 
-                                ['販売', '平均宿泊単価', 'リードタイム（日）', '稼働率'])
-
-    st.subheader(f"📈 {graph_option} の推移（施設別）")
-
-    # グラフを描画
     plt.figure(figsize=(10, 5))
-    for name, group in summary.groupby('物件名'):
-        plt.plot(group['年月'], group[graph_option], label=name)
+    for name in selected_facilities:
+        facility_data = df_month[df_month['物件名'] == name]
+        plt.plot(facility_data['チェックイン'], facility_data[metric], marker='o', label=name)
 
-    plt.xlabel("年月")
-    plt.ylabel(graph_option)
+    plt.xlabel("チェックイン日")
+    plt.ylabel(metric)
     plt.legend()
     plt.xticks(rotation=45)
     plt.tight_layout()
     st.pyplot(plt)
+else:
+    st.info("施設を1つ以上選んでください。")
